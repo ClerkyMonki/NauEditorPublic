@@ -24,6 +24,8 @@ static constexpr float NauGizmoMeter = 0.01;
 static constexpr int NauGizmoCircleDensity = 40;
 static constexpr float NauGizmoPlaneMin = 0.20f;
 static constexpr float NauGizmoPlaneMax = 0.45f;
+static constexpr float NauGizmoMinPlaneScreenArea = 1.0f; // Square pixels
+// Minimum absolute cosine of the ray–normal angle for hover and drag
 static constexpr float NauGizmoMinPlaneRayDot = 0.05f;
 
 static const nau::math::E3DCOLOR ColorRed = {255, 0, 0};
@@ -62,6 +64,7 @@ static bool isPointInConvexPolygon(const nau::math::vec2& point, const nau::math
 {
     bool has_neg = false;
     bool has_pos = false;
+    float twiceArea = 0.0f;
 
     for (int i = 0; i < count; ++i) {
         const nau::math::vec2& a = poly[i];
@@ -72,13 +75,11 @@ static bool isPointInConvexPolygon(const nau::math::vec2& point, const nau::math
 
         has_neg = has_neg || (cross < 0);
         has_pos = has_pos || (cross > 0);
+        twiceArea += cross;
     }
 
-    if (!has_neg && !has_pos) {
-        return false;
-    }
-
-    return !(has_neg && has_pos);
+    // The signed triangle areas around the cursor sum to the polygon area.
+    return !(has_neg && has_pos) && fabsf(twiceArea) >= 2.0f * NauGizmoMinPlaneScreenArea;
 }
 
 static bool isGizmoOnScreen(const nau::math::mat4& basis)
@@ -432,6 +433,8 @@ NauGizmoAbstract::Axes NauTranslateGizmo::detectHoveredAxes(nau::math::vec2 scre
     const auto hitPlane = [&](Axes axes, const nau::math::vec3& axisA, const nau::math::vec3& axisB) {
         const auto normal = Vectormath::SSE::cross(axisA, axisB);
         const float rayDot = Vectormath::SSE::dot(normal, rayDirection);
+
+        // Scale the angular threshold for the unnormalized normal
         if (fabsf(rayDot) <= NauGizmoMinPlaneRayDot * Vectormath::SSE::length(normal)) {
             return;
         }
@@ -531,13 +534,12 @@ void NauTranslateGizmo::renderInternal(const nau::math::mat4& basis, int selecte
     const nau::math::vec3 axisZ = Vectormath::SSE::normalize(basis.getCol2().getXYZ()) * m_axesLength3d;
 
     nau::math::vec3 corners[4];
-    const auto drawPlaneHandle = [&](const nau::math::vec3& axisA, const nau::math::vec3& axisB, const nau::math::E3DCOLOR& color)
-        {
-            planeHandleCorners(center, axisA, axisB, corners);
-            for (int i = 0; i < 4; ++i) {
-                dr.drawLine(nau::math::Point3(corners[i]), nau::math::Point3(corners[(i + 1) % 4]), color, 1);
-            }
-        };
+    const auto drawPlaneHandle = [&](const nau::math::vec3& axisA, const nau::math::vec3& axisB, const nau::math::E3DCOLOR& color) {
+        planeHandleCorners(center, axisA, axisB, corners);
+        for (int i = 0; i < 4; ++i) {
+            dr.drawLine(nau::math::Point3(corners[i]), nau::math::Point3(corners[(i + 1) % 4]), color, 1);
+        }
+    };
 
     drawPlaneHandle(axisX, axisY, (m_hoveredAxes == AxisXY) ? ColorYellow : ColorLtRed);
     drawPlaneHandle(axisX, axisZ, (m_hoveredAxes == AxisXZ) ? ColorYellow : ColorLtBlue);
