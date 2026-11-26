@@ -14,8 +14,6 @@
 #include "nau/asset_tools/asset_api.h"
 
 #include <QApplication>
-#include <QDir>
-#include <QFileInfo>
 #include "nau/usd_meta_tools/usd_meta_info.h"
 
 #include <pxr/usd/ar/defineResolver.h>
@@ -213,10 +211,7 @@ std::string NauUsdAssetProcessor::assetSourceFile(const std::string& metaFilePat
             continue;
         }
 
-        const QDir metaFileDir = QFileInfo(QString::fromStdString(metaFilePath)).absoluteDir();
-        const QFileInfo sourceFile(metaFileDir, QString::fromStdString(meta.assetSourcePath));
-
-        return sourceFile.absoluteFilePath().toStdString();
+        return meta.assetSourcePath;
     }
 
     return std::string();

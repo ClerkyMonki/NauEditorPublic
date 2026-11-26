@@ -21,8 +21,9 @@ public:
     // Meta file format is known to the asset system only, so it provides the operations on meta files.
     struct AssetMetaOperations
     {
-        // Returns the declared source path, including a missing source; empty means no source.
+        // Returns the path as written in the meta file; empty means no source.
         std::function<QString(const QString& metaFilePath)> sourcePath;
+        QString assetRoot;
     };
 
     static void setAssetMetaOperations(AssetMetaOperations operations);
@@ -38,7 +39,7 @@ public:
     // Includes sources unless referenced by unselected assets.
     static bool moveAssetsToTrash(const QStringList& paths);
 
-    // Supports cross-volume moves; rolls back completed steps on failure.
+    // Moves directory contents as individual files; rolls back completed steps on failure.
     static bool movePaths(const QStringList& srcPaths, const QString& dstDir);
 
     // Returns the declared source path, even if missing; empty means no source.
@@ -67,6 +68,7 @@ private:
     static AssetMetaOperations m_assetMetaOperations;
 
     static bool isAssetMetaFile(const QString& path);
+    static bool checkSourceDependencies(const QStringList& paths, const QString& dstDir = {});
 
     static QString cutOperationMimeType();
     static QByteArray copyDropEffectData();

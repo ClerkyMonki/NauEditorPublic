@@ -32,8 +32,8 @@ public:
     // Reads asset meta file and gets source path info from it
     virtual std::string sourcePathFromAssetFile(const std::string& assetPath) = 0;
 
-    // Returns absolute path of the file that specified meta file refers to as its source.
-    // Returns the declared path even if the source is missing; empty means no source (e.g. materials).
+    // Returns the source path as written in the meta file, even if the source is missing.
+    // Empty means no source (e.g. materials).
     virtual std::string assetSourceFile(const std::string& metaFilePath) = 0;
 
     virtual std::string_view assetFileFilter() const = 0;

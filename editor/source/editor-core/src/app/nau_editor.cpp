@@ -376,6 +376,7 @@ void NauEditor::initAssetManagerModule()
         [&assetProcessor](const QString& metaFilePath) {
             return QString::fromStdString(assetProcessor.assetSourceFile(metaFilePath.toStdString()));
         },
+        m_project->path().root().absolutePath(),
     });
     m_assetManager->initialize(*m_project);
 

@@ -24,13 +24,42 @@
 
 namespace
 {
+    QString resolveSourcePath(const QString& meta, const QString& source)
+    {
+        return QDir::cleanPath(QFileInfo{meta}.absoluteDir().absoluteFilePath(source));
+    }
+
+    bool pathInside(const QString& directory, const QString& path)
+    {
+#ifdef Q_OS_WIN
+        constexpr auto sensitivity = Qt::CaseInsensitive;
+#else
+        constexpr auto sensitivity = Qt::CaseSensitive;
+#endif
+        const QString base = QDir::cleanPath(QFileInfo{directory}.absoluteFilePath());
+        const QString item = QDir::cleanPath(QFileInfo{path}.absoluteFilePath());
+        return item.compare(base, sensitivity) == 0
+            || item.startsWith(base + QLatin1Char('/'), sensitivity);
+    }
+
     class NauFileTransaction
     {
+        static bool move(const QString& src, const QString& dst)
+        {
+            if (QFile::rename(src, dst)) return true;
+            if (!QFileInfo{src}.isFile() || QFileInfo::exists(dst) || !QFile::copy(src, dst)) return false;
+            if (QFile::remove(src)) return true;
+            if (!QFile::remove(dst)) {
+                NED_ERROR("Failed to remove incomplete move destination {}", dst.toUtf8().constData());
+            }
+            return false;
+        }
+
     public:
-        // Note that QFile::rename falls back to copy and remove if src and dst are on different volumes.
+        // Directory contents are moved as individual files, not by renaming the directory
         bool moveFile(const QString& src, const QString& dst)
         {
-            if (!QFile::rename(src, dst)) {
+            if (!move(src, dst)) {
                 NED_ERROR("Failed to move {} to {}", src.toUtf8().constData(), dst.toUtf8().constData());
                 return false;
             }
@@ -42,7 +71,7 @@ namespace
         bool moveDirectory(const QString& src, const QString& dst)
         {
             const NauDir srcDir(src);
-            if (!srcDir.exists()) return false;
+            if (!srcDir.exists() || QFileInfo::exists(dst)) return false;
 
             if (!QFileInfo::exists(dst)) {
                 if (!NauDir().mkdir(dst)) return false;
@@ -94,7 +123,7 @@ namespace
                 bool result = false;
                 switch (step->type)
                 {
-                case StepType::Moved: result = QFile::rename(step->to, step->from); break;
+                case StepType::Moved: result = move(step->to, step->from); break;
                 case StepType::DirCreated: result = NauDir().rmdir(step->to); break;
                 case StepType::DirRemoved: result = NauDir().mkdir(step->from); break;
                 }
@@ -189,7 +218,7 @@ bool NauFileOperations::pasteFromClipboard(const QModelIndex& parent)
         // Copy keeps its existing behavior; source/meta duplication is handled separately.
         for (const QString& srcPath : srcPaths) {
             const bool isDir = QFileInfo{srcPath}.isDir();
-            if (isDir && dstPath.absolutePath().startsWith(srcPath)) {
+            if (isDir && pathInside(srcPath, dstPath.absolutePath())) {
                 result = false;
                 continue;
             }
@@ -205,7 +234,7 @@ bool NauFileOperations::pasteFromClipboard(const QModelIndex& parent)
         }
     }
 
-    if (result) {
+    if (result && cutting) {
         clipboard->clear();
     }
     return result;
@@ -345,6 +374,26 @@ QString NauFileOperations::generateFileName(const QString& fileName)
 bool NauFileOperations::movePaths(const QStringList& srcPaths, const QString& dstDir)
 {
     const NauDir dstPath = dstDir;
+    QStringList destinations;
+    for (const QString& srcPath : srcPaths) {
+        const QFileInfo source{srcPath};
+        const QString destination = dstPath.absoluteFilePath(source.fileName());
+        if (source == QFileInfo{destination}) continue;
+#ifdef Q_OS_WIN
+        constexpr auto sensitivity = Qt::CaseInsensitive;
+#else
+        constexpr auto sensitivity = Qt::CaseSensitive;
+#endif
+        if (!source.exists() || QFileInfo::exists(destination)
+            || destinations.contains(destination, sensitivity)
+            || (source.isDir() && dstPath.absolutePath().startsWith(
+                source.absoluteFilePath() + QLatin1Char('/'), sensitivity))) {
+            NED_WARNING("Move declined: invalid or conflicting destination {}", destination.toUtf8().constData());
+            return false;
+        }
+        destinations << destination;
+    }
+    if (!checkSourceDependencies(srcPaths, dstPath.absolutePath())) return false;
     NauFileTransaction transaction;
 
     for (const QString& srcPath : srcPaths) {
@@ -391,6 +440,7 @@ bool NauFileOperations::moveToTrash(const QStringList& paths)
 
 bool NauFileOperations::moveAssetsToTrash(const QStringList& paths)
 {
+    if (!checkSourceDependencies(paths)) return false;
     QStringList sources;
     for (const QString& path : paths) {
         const QString source = assetSourcePath(path);
@@ -410,7 +460,8 @@ QString NauFileOperations::assetSourcePath(const QString& path)
 {
     if (!isAssetMetaFile(path) || !m_assetMetaOperations.sourcePath) return QString();
 
-    return m_assetMetaOperations.sourcePath(path);
+    const QString source = m_assetMetaOperations.sourcePath(path);
+    return source.isEmpty() ? QString() : resolveSourcePath(path, source);
 }
 
 bool NauFileOperations::isAssetMetaFile(const QString& path)
@@ -429,13 +480,18 @@ QStringList NauFileOperations::assetsSharingSource(const QString& path, const QS
 
     QStringList result;
 
-    // Source path in a meta file is relative and generated next to it, so looking for other meta files in its directory.
-    const NauDir sourceDir = QFileInfo{sourcePath}.absoluteDir();
-    for (const QString& fileEntry : sourceDir.entryList({QStringLiteral("*.nausd")}, QDir::Files)) {
-        const QString metaFilePath = sourceDir.absoluteFilePath(fileEntry);
+    const QString root = m_assetMetaOperations.assetRoot.isEmpty()
+        ? QFileInfo{sourcePath}.absolutePath() : m_assetMetaOperations.assetRoot;
+    QDirIterator it(root, QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString metaFilePath = it.next();
+        if (!isAssetMetaFile(metaFilePath)) continue;
 
         const bool skipped = isSameFile(metaFilePath, path) || std::any_of(ignored.begin(), ignored.end(),
-            [&](const QString& ignoredPath) { return isSameFile(metaFilePath, ignoredPath); });
+            [&](const QString& ignoredPath) {
+                return isSameFile(metaFilePath, ignoredPath)
+                    || (QFileInfo{ignoredPath}.isDir() && pathInside(ignoredPath, metaFilePath));
+            });
 
         if (!skipped && isSameFile(assetSourcePath(metaFilePath), sourcePath)) {
             result << metaFilePath;
@@ -443,4 +499,53 @@ QStringList NauFileOperations::assetsSharingSource(const QString& path, const QS
     }
 
     return result;
+}
+
+bool NauFileOperations::checkSourceDependencies(const QStringList& paths, const QString& dstDir)
+{
+    if (!m_assetMetaOperations.sourcePath) return true;
+    const bool moving = !dstDir.isEmpty();
+    const auto selectedItem = [&](const QString& path) -> QString {
+        for (const QString& item : paths) {
+            if (QFileInfo{item} == QFileInfo{path} || (QFileInfo{item}.isDir() && pathInside(item, path))) {
+                return item;
+            }
+        }
+        return {};
+    };
+    const auto destination = [&](const QString& item, const QString& path) {
+        const QFileInfo info{item};
+        const QString root = QDir{dstDir}.absoluteFilePath(info.fileName());
+        return QFileInfo{path} == info ? root
+            : QDir{root}.absoluteFilePath(QDir{info.absoluteFilePath()}.relativeFilePath(path));
+    };
+    QStringList roots{m_assetMetaOperations.assetRoot};
+    if (roots.front().isEmpty()) {
+        roots.clear();
+        for (const QString& path : paths) roots << QFileInfo{path}.absolutePath();
+        roots.removeDuplicates();
+    }
+    for (const QString& root : roots) {
+        QDirIterator it(root, QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString meta = it.next();
+            if (!isAssetMetaFile(meta)) continue;
+            const QString authoredSource = m_assetMetaOperations.sourcePath(meta);
+            if (authoredSource.isEmpty()) continue;
+            const QString source = resolveSourcePath(meta, authoredSource);
+            const QString metaItem = selectedItem(meta);
+            const QString sourceItem = selectedItem(source);
+            const bool crossesSelection = (metaItem.isEmpty() && !sourceItem.isEmpty())
+                || (moving && !metaItem.isEmpty() && sourceItem.isEmpty());
+            const bool breaksLink = moving && !metaItem.isEmpty() && !sourceItem.isEmpty()
+                && QFileInfo{resolveSourcePath(destination(metaItem, meta), authoredSource)}
+                    != QFileInfo{QDir::cleanPath(destination(sourceItem, source))};
+            if (crossesSelection || breaksLink) {
+                NED_WARNING("Operation declined: would break the source link in {}",
+                    meta.toUtf8().constData());
+                return false;
+            }
+        }
+    }
+    return true;
 }

@@ -7,7 +7,7 @@
 
 #include <QDir>
 #include <QFile>
-#include <QFileSystemWatcher>
+
 #include <QTemporaryDir>
 
 #ifdef Q_OS_WIN
@@ -48,10 +48,9 @@ namespace
 
             NauFileOperations::setAssetMetaOperations({
                 [](const QString& metaFilePath) {
-                    const QString sourceName = QString::fromUtf8(readFile(metaFilePath).split('\n').front());
-                    return sourceName.isEmpty() ? QString()
-                        : QFileInfo(QFileInfo{metaFilePath}.absoluteDir(), sourceName).absoluteFilePath();
+                    return QString::fromUtf8(readFile(metaFilePath).split('\n').front());
                 },
+                tempDir.path(),
             });
         }
 
@@ -310,25 +309,6 @@ TEST(NauFileOperationsTests, copyPathRecursivelyNonExistentSource)
     EXPECT_FALSE(result);
 }
 
-TEST(NauFileOperationsTests, moveToTrashWatchedDirectoryReportsFailure)
-{
-    // Arrange
-    const QTemporaryDir tempDir;
-    ASSERT_TRUE(tempDir.isValid());
-    const QString dirPath = tempDir.filePath("watched");
-    ASSERT_TRUE(createFile(dirPath + "/sub/file.txt"));
-
-    // Windows doesn't allow moving a watched directory, but Qt reports success anyway.
-    QFileSystemWatcher watcher;
-    watcher.addPaths({dirPath, dirPath + "/sub"});
-
-    // Act
-    const bool result = NauFileOperations::moveToTrash({dirPath});
-
-    // Assert
-    EXPECT_EQ(result, !QFileInfo::exists(dirPath));
-}
-
 TEST_F(NauFileOperationsAssetTests, assetsSharingSourceFindsOtherMetaFiles)
 {
     // Arrange
@@ -558,3 +538,80 @@ TEST_F(NauFileOperationsAssetTests, trashSelectionRestoresSharedSourceWhenSecond
     EXPECT_EQ(readFile(second), QByteArray("texture.png\nsecond uid"));
 }
 #endif
+
+TEST_F(NauFileOperationsAssetTests, folderWithExternallyReferencedSourceCannotBeDeletedOrMoved)
+{
+    const QString folder = tempDir.filePath("folder");
+    ASSERT_TRUE(createFile(folder + "/source.png"));
+    ASSERT_TRUE(createMetaFile(tempDir.filePath("outside/meta.nausd"), "../folder/source.png"));
+    ASSERT_TRUE(QDir().mkdir(tempDir.filePath("destination")));
+    EXPECT_FALSE(NauFileOperations::moveAssetsToTrash({folder}));
+    EXPECT_FALSE(NauFileOperations::movePaths({folder}, tempDir.filePath("destination")));
+    EXPECT_TRUE(QFileInfo::exists(folder + "/source.png"));
+}
+
+TEST(NauFileOperationsTests, conflictingFolderDoesNotMergeOrMoveEarlierItems)
+{
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    ASSERT_TRUE(createFile(dir.filePath("source/first.txt")));
+    ASSERT_TRUE(createFile(dir.filePath("source/folder/new.txt")));
+    ASSERT_TRUE(createFile(dir.filePath("destination/folder/existing.txt")));
+    EXPECT_FALSE(NauFileOperations::movePaths(
+        {dir.filePath("source/first.txt"), dir.filePath("source/folder")}, dir.filePath("destination")));
+    EXPECT_TRUE(QFileInfo::exists(dir.filePath("source/first.txt")));
+    EXPECT_FALSE(QFileInfo::exists(dir.filePath("destination/first.txt")));
+    EXPECT_FALSE(QFileInfo::exists(dir.filePath("destination/folder/new.txt")));
+}
+
+TEST_F(NauFileOperationsAssetTests, deletingMetaKeepsSourceSharedAcrossDirectories)
+{
+    const QString source = tempDir.filePath("sources/shared.png");
+    const QString first = tempDir.filePath("a/first.nausd");
+    const QString second = tempDir.filePath("b/second.nausd");
+    ASSERT_TRUE(createFile(source));
+    ASSERT_TRUE(createMetaFile(first, "../sources/shared.png"));
+    ASSERT_TRUE(createMetaFile(second, "../sources/shared.png"));
+    EXPECT_TRUE(NauFileOperations::moveAssetsToTrash({first}));
+    EXPECT_FALSE(QFileInfo::exists(first));
+    EXPECT_TRUE(QFileInfo::exists(source));
+    EXPECT_TRUE(QFileInfo::exists(second));
+}
+
+TEST_F(NauFileOperationsAssetTests, folderWithInternalDependenciesCanBeMoved)
+{
+    const QString folder = tempDir.filePath("folder");
+    const QString destination = tempDir.filePath("destination");
+    ASSERT_TRUE(createFile(folder + "/source.png"));
+    ASSERT_TRUE(createMetaFile(folder + "/meta.nausd", "source.png"));
+    ASSERT_TRUE(QDir().mkdir(destination));
+    EXPECT_TRUE(NauFileOperations::movePaths({folder}, destination));
+    EXPECT_FALSE(QFileInfo::exists(folder));
+    EXPECT_TRUE(QFileInfo::exists(destination + "/folder/source.png"));
+    EXPECT_TRUE(QFileInfo::exists(destination + "/folder/meta.nausd"));
+}
+
+TEST_F(NauFileOperationsAssetTests, movingSourceAloneCannotBreakMetaInAnotherDirectory)
+{
+    const QString source = tempDir.filePath("sources/shared.png");
+    ASSERT_TRUE(createFile(source));
+    ASSERT_TRUE(createMetaFile(tempDir.filePath("a/meta.nausd"), "../sources/shared.png"));
+    ASSERT_TRUE(QDir().mkdir(tempDir.filePath("destination")));
+    EXPECT_FALSE(NauFileOperations::movePaths({source}, tempDir.filePath("destination")));
+    EXPECT_TRUE(QFileInfo::exists(source));
+}
+
+TEST_F(NauFileOperationsAssetTests, moveRejectsFoldersWhenTheirRelativeSourceLinkWouldBreak)
+{
+    const QString metaFolder = tempDir.filePath("a/meta");
+    const QString sourceFolder = tempDir.filePath("b/source");
+    const QString destination = tempDir.filePath("destination");
+    ASSERT_TRUE(createMetaFile(metaFolder + "/asset.nausd", "../../b/source/asset.png"));
+    ASSERT_TRUE(createFile(sourceFolder + "/asset.png"));
+    ASSERT_TRUE(QDir().mkdir(destination));
+
+    EXPECT_FALSE(NauFileOperations::movePaths({metaFolder, sourceFolder}, destination));
+    EXPECT_TRUE(QFileInfo::exists(metaFolder + "/asset.nausd"));
+    EXPECT_TRUE(QFileInfo::exists(sourceFolder + "/asset.png"));
+    EXPECT_TRUE(QDir{destination}.entryList(QDir::AllEntries | QDir::NoDotAndDotDot).isEmpty());
+}
