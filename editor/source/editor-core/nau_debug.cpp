@@ -14,7 +14,16 @@ void Nau::DebugTools::QtMessageHandler(QtMsgType type, const QMessageLogContext&
     const char* file = context.file ? context.file : "";
     const char* function = context.function ? context.function : "";
 
-    if (!NED_PASSTHROUGH_ASSERT(type == QtDebugMsg || type == QtInfoMsg)) {
-        NED_ERROR("QtError: {} ({}:{}, {})", localMsg.constData(), file, context.line, function);
+    if (type == QtDebugMsg || type == QtInfoMsg) return;
+
+    NED_ERROR("QtError: {} ({}:{}, {})", localMsg.constData(), file, context.line, function);
+
+#ifdef Q_OS_WIN
+    // Qt may fail to rearm a directory watch after the directory has already moved.
+    if (type == QtCriticalMsg
+        && msg.startsWith(QStringLiteral("QFileSystemWatcher: FindNextChangeNotification failed for "))) {
+        return;
     }
+#endif
+    NED_ASSERT(type == QtDebugMsg || type == QtInfoMsg);
 }

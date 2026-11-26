@@ -61,6 +61,9 @@ void NauAssetWatcher::updateDirectory(const QString& dirPath, bool isInitialized
         m_assetsWatcher.removePaths(pathList);
         pathList.clear();
     }
+    if (!QFileInfo{dirPath}.isDir()) {
+        return;
+    }
     pathList.push_back(dirPath);
     {
         QDirIterator directoryIt(dirPath, QDir::Files, QDirIterator::Subdirectories);
